@@ -41,13 +41,24 @@ const host = window.location.host;
 const socketUrl = `${protocol}//${host}`;
 
 let socket;
+let pingInterval; // Variable to hold the ping interval
+
 const startWebSocket = () => {
     return new Promise((resolve, reject) => {
+        // Clear any existing ping interval
+        if (pingInterval) {
+            clearInterval(pingInterval);
+        }
+        
         socket = new WebSocket(socketUrl);
         
         socket.onopen = () => {
             console.log("Conexão WebSocket estabelecida.");
             appendMessage("Conexão estabelecida.");
+            
+            // Setup ping-pong to keep the connection alive
+            setupPingPong();
+            
             resolve();
         };
         
@@ -62,17 +73,31 @@ const startWebSocket = () => {
                 return;
             }
             console.log("Mensagem recebida: ", message);
-            const data = JSON.parse(message);
-            if(data.type === 'wordUpdate') {
-                console.log("Lista atualizada: ", data.words);
-            }else if(data.type === 'aiResponse') {
-                appendMessage(`Audio URL: ${data.audioURL}`);
-                appendMessage(`Pergunta: ${data.text}`);
-                displayWord(
-                    data.text,
-                    data.audioURL
-                );
-                stateManager.setState(states.DISPLAYING);
+            
+            // Try-catch to handle potential JSON parse errors
+            try {
+                const data = JSON.parse(message);
+                
+                // Handle ping response if the server supports it
+                if (data.type === 'pong') {
+                    console.log("Pong received from server");
+                    return;
+                }
+                
+                if(data.type === 'wordUpdate') {
+                    console.log("Lista atualizada: ", data.words);
+                }else if(data.type === 'aiResponse') {
+                    appendMessage(`Audio URL: ${data.audioURL}`);
+                    appendMessage(`Pergunta: ${data.text}`);
+                    displayWord(
+                        data.text,
+                        data.audioURL
+                    );
+                    stateManager.setState(states.DISPLAYING);
+                }
+            } catch (error) {
+                console.error("Error parsing message:", error);
+                console.log("Raw message:", message);
             }
         };
         
@@ -85,6 +110,12 @@ const startWebSocket = () => {
         socket.onclose = () => {
             console.log("Conexão WebSocket fechada.");
             appendMessage("Conexão encerrada.");
+            
+            // Clear the ping interval when socket closes
+            if (pingInterval) {
+                clearInterval(pingInterval);
+            }
+            
             setTimeout(() => {
                 console.log("Tentando reconectar...");
                 startWebSocket()
@@ -93,6 +124,20 @@ const startWebSocket = () => {
             }, 500);
         };
     });
+}
+
+// Function to setup the ping-pong mechanism
+function setupPingPong() {
+    // Send a ping every 30 seconds to prevent the 120-second timeout
+    pingInterval = setInterval(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            // Send a ping message to keep the connection alive
+            socket.send(JSON.stringify({type: 'ping'}));
+            console.log("Ping sent to keep connection alive");
+        } else {
+            console.warn("Cannot send ping - socket is not open");
+        }
+    }, 30000); // 30 seconds interval (well below the 2 minute timeout)
 }
 
 function sendMessage(message) {
@@ -370,9 +415,37 @@ function init() {
     createDraggables(words);
 }
 
+// Connection status indicator - optional but useful
+function createConnectionIndicator() {
+    const indicator = document.createElement("div");
+    indicator.id = "connection-status";
+    indicator.style.position = "fixed";
+    indicator.style.bottom = "10px";
+    indicator.style.right = "10px";
+    indicator.style.width = "15px";
+    indicator.style.height = "15px";
+    indicator.style.borderRadius = "50%";
+    indicator.style.backgroundColor = "red";
+    document.body.appendChild(indicator);
+    
+    // Update based on connection state
+    setInterval(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            indicator.style.backgroundColor = "green";
+        } else if (socket && socket.readyState === WebSocket.CONNECTING) {
+            indicator.style.backgroundColor = "orange";
+        } else {
+            indicator.style.backgroundColor = "red";
+        }
+    }, 1000);
+}
+
 // Previne o recarregamento da página ao arrastar o dedo na tela
 document.addEventListener('touchmove', function (event) {
     event.preventDefault();
 }, { passive: false });
 
-Promise.all([loadWords(), startWebSocket()]).then(init);
+Promise.all([loadWords(), startWebSocket()]).then(() => {
+    init();
+    createConnectionIndicator(); // Add optional connection indicator
+});
