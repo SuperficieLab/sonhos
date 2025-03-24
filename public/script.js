@@ -8,6 +8,7 @@ const states = {
     WAITING: 'WAITING',
     DISPLAYING: 'DISPLAYING'
 };
+
 function createStateManager() {
     let currentState; 
     return {
@@ -41,103 +42,87 @@ const host = window.location.host;
 const socketUrl = `${protocol}//${host}`;
 
 let socket;
-let pingInterval; // Variable to hold the ping interval
+let reconnectAttempts = 0;
 
 const startWebSocket = () => {
     return new Promise((resolve, reject) => {
-        // Clear any existing ping interval
-        if (pingInterval) {
-            clearInterval(pingInterval);
-        }
-        
         socket = new WebSocket(socketUrl);
-        
+
         socket.onopen = () => {
             console.log("Conexão WebSocket estabelecida.");
             appendMessage("Conexão estabelecida.");
-            
-            // Setup ping-pong to keep the connection alive
-            setupPingPong();
-            
+            reconnectAttempts = 0; // Reset after successful connection
             resolve();
+
+            // Start ping-pong after the connection is established
+            startPingPong();
         };
-        
+
         socket.onmessage = async (event) => {
             let message = '';
-            if(event.data instanceof Blob) {
+            if (event.data instanceof Blob) {
                 message = await event.data.text();
-            }else if(typeof event.data === 'string') {
+            } else if (typeof event.data === 'string') {
                 message = event.data;
-            }else{
+            } else {
                 console.error("Tipo de mensagem não suportado: ", typeof event.data);
                 return;
             }
+
             console.log("Mensagem recebida: ", message);
-            
-            // Try-catch to handle potential JSON parse errors
-            try {
-                const data = JSON.parse(message);
-                
-                // Handle ping response if the server supports it
-                if (data.type === 'pong') {
-                    console.log("Pong received from server");
-                    return;
-                }
-                
-                if(data.type === 'wordUpdate') {
-                    console.log("Lista atualizada: ", data.words);
-                }else if(data.type === 'aiResponse') {
-                    appendMessage(`Audio URL: ${data.audioURL}`);
-                    appendMessage(`Pergunta: ${data.text}`);
-                    displayWord(
-                        data.text,
-                        data.audioURL
-                    );
-                    stateManager.setState(states.DISPLAYING);
-                }
-            } catch (error) {
-                console.error("Error parsing message:", error);
-                console.log("Raw message:", message);
+            const data = JSON.parse(message);
+
+            if (data.type === 'wordUpdate') {
+                console.log("Lista atualizada: ", data.words);
+            } else if (data.type === 'aiResponse') {
+                appendMessage(`Audio URL: ${data.audioURL}`);
+                appendMessage(`Pergunta: ${data.text}`);
+                displayWord(data.text, data.audioURL);
+                stateManager.setState(states.DISPLAYING);
+            } else if (data.type === 'pong') {
+                console.log('Pong received');
             }
         };
-        
+
         socket.onerror = (error) => {
             console.error("Erro no WebSocket: ", error);
             appendMessage("Erro na conexão.");
-            reject();
+
+            // Reject the connection if a 504 error is encountered
+            if (error.code === 504) {
+                console.error("Erro 504 detectado! A conexão falhou.");
+                reject(new Error("504 Gateway Timeout"));
+            } else {
+                reject(error); // Reject for other errors as well
+            }
         };
-        
+
         socket.onclose = () => {
             console.log("Conexão WebSocket fechada.");
             appendMessage("Conexão encerrada.");
             
-            // Clear the ping interval when socket closes
-            if (pingInterval) {
-                clearInterval(pingInterval);
-            }
-            
+            // Exponential backoff for reconnection
+            const delay = Math.min(5000, 1000 * Math.pow(2, reconnectAttempts)); // Max delay 5 seconds
+            reconnectAttempts++;
+
             setTimeout(() => {
-                console.log("Tentando reconectar...");
+                console.log(`Tentando reconectar em ${delay}ms...`);
                 startWebSocket()
                     .then(() => console.log("Reconexão bem-sucedida."))
                     .catch(() => console.error("Erro ao tentar reconectar."));
-            }, 500);
+            }, delay);
         };
     });
-}
+};
 
-// Function to setup the ping-pong mechanism
-function setupPingPong() {
-    // Send a ping every 30 seconds to prevent the 120-second timeout
-    pingInterval = setInterval(() => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            // Send a ping message to keep the connection alive
-            socket.send(JSON.stringify({type: 'ping'}));
-            console.log("Ping sent to keep connection alive");
-        } else {
-            console.warn("Cannot send ping - socket is not open");
+// Ping-Pong to keep connection alive
+function startPingPong() {
+    const pingInterval = 30000; // 30 seconds
+    setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'ping' }));
         }
-    }, 30000); // 30 seconds interval (well below the 2 minute timeout)
+    }, pingInterval);
 }
 
 function sendMessage(message) {
@@ -327,7 +312,6 @@ document.addEventListener('touchend', function() {
     });
   }
 }, { once: true });
-  
 
 /**
  * LOADING
@@ -398,7 +382,6 @@ const loadWords = () =>
             const response = await fetch('palavras.json'); 
             words = await response.json();
             words.forEach((item, index) => {
-                //  console.log(`Código RFID1: ${item.codigo1}, RFID2: ${item.codigo2}, Palavra: ${item.palavra}`);
                 words[index].audio = new Audio(item.audioUrl);
                 words[index].audio.preload = 'auto';
             });
@@ -415,37 +398,17 @@ function init() {
     createDraggables(words);
 }
 
-// Connection status indicator - optional but useful
-function createConnectionIndicator() {
-    const indicator = document.createElement("div");
-    indicator.id = "connection-status";
-    indicator.style.position = "fixed";
-    indicator.style.bottom = "10px";
-    indicator.style.right = "10px";
-    indicator.style.width = "15px";
-    indicator.style.height = "15px";
-    indicator.style.borderRadius = "50%";
-    indicator.style.backgroundColor = "red";
-    document.body.appendChild(indicator);
-    
-    // Update based on connection state
-    setInterval(() => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            indicator.style.backgroundColor = "green";
-        } else if (socket && socket.readyState === WebSocket.CONNECTING) {
-            indicator.style.backgroundColor = "orange";
-        } else {
-            indicator.style.backgroundColor = "red";
-        }
-    }, 1000);
-}
-
 // Previne o recarregamento da página ao arrastar o dedo na tela
 document.addEventListener('touchmove', function (event) {
     event.preventDefault();
 }, { passive: false });
 
-Promise.all([loadWords(), startWebSocket()]).then(() => {
-    init();
-    createConnectionIndicator(); // Add optional connection indicator
-});
+// Carrega as palavras e inicializa a aplicação
+loadWords()
+    .then(() => {
+        init();
+        startWebSocket().then(() => console.log("Conexão WebSocket iniciada."));
+    })
+    .catch(() => {
+        console.error("Erro ao carregar palavras.");
+    });
